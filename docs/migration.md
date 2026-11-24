@@ -44,7 +44,7 @@ disturbed. Paths are those in redox-rpi.
 1. **Pin:** a file `os-release` with the redox-rpi tag (`v0.6.0` first).
 2. **Build** (`scripts/build.sh`, on the build host, in its own clone):
    check out redox-rpi at the pinned tag; read the experiment list from
-   that release's manifest (`redox-rpi-<tag>.manifest.toml`, a release
+   that release's manifest (`redox-rpi-<tag>-pi3bplus.img.manifest.toml`, a release
    asset); copy this repository's recipes into a generated experiment in
    the clone that lists the packages; run redox-rpi's `build-image.sh`
    with the release options plus that experiment. This is what the
