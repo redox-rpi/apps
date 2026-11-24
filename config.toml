@@ -1,0 +1,18 @@
+# Packages this repository builds, in the format of a redox-rpi experiment's
+# config.toml (scripts/build.sh copies it into the generated experiment).
+#
+# [packages]: every package to build. A recipe of this repository is
+# recipes/<group>/<name>/recipe.toml; list it here as "source". Upstream
+# libraries without aarch64 binary packages (sdl1, sdl1-mixer, ...) are
+# listed as "source" too. Each listed package and the packages it depends
+# on are published, except the OS's own (see OS_PACKAGES in scripts/build.sh).
+#
+# A package brings its own launcher entry (/usr/share/ui/apps/<NN>_<name>)
+# from its recipe: [[files]] here would go into the build image only, not
+# into the package.
+
+[general]
+# The build installs every package into its image.
+filesystem_size = 1024
+
+[packages]
