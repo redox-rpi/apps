@@ -87,6 +87,18 @@ git -C "$clone" checkout -q --detach "$ref"
 commit="$(git -C "$clone" rev-parse HEAD)"
 log "redox-rpi $track at ${commit:0:12}"
 
+# The cookbook reuses a package's earlier build when its own source did not
+# change, even when relibc did. Packages built against another relibc are
+# what this repository must never publish, so a new relibc (its pin or its
+# patches) clears the builds of every recipe outside recipes/core.
+libc_key="$( (cd "$clone" && grep -E '^relibc[ =]' config/upstream.lock; cat patches/relibc/*.patch 2>/dev/null) | sha256sum | cut -c1-16)"
+stamp="$clone/build/.apps-relibc"
+if [ -d "$clone/upstream/redox/recipes" ] && [ "$(cat "$stamp" 2>/dev/null)" != "$libc_key" ]; then
+    log "relibc differs from the last build here: clearing the builds outside recipes/core"
+    find "$clone/upstream/redox/recipes" -path "$clone/upstream/redox/recipes/core" -prune -o \
+        -type d -name target -prune -exec rm -rf {} +
+fi
+
 # 2. The release build's experiments.
 asset="redox-rpi-$tag-pi3bplus.img.manifest.toml"
 manifest="$(curl -fsSL "https://github.com/redox-rpi/redox-rpi/releases/download/$tag/$asset")" ||
@@ -123,6 +135,8 @@ blog="$ROOT/build/build-$track.log"
 log "building ${wanted[*]} (log $blog)"
 (cd "$clone" && scripts/build-image.sh --no-test-experiments "${experiments[@]}" --experiment "$EXP") \
     > "$blog" 2>&1 || die "build failed, see $blog"
+mkdir -p "$clone/build"
+echo "$libc_key" > "$stamp"
 build_id="$(sed -n 's/^build_id = "\(.*\)"$/\1/p' "$clone/build/manifests/netboot-latest.toml")"
 log "built $build_id"
 
