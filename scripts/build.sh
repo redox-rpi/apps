@@ -91,15 +91,16 @@ log "redox-rpi $track at ${commit:0:12}"
 asset="redox-rpi-$tag-pi3bplus.img.manifest.toml"
 manifest="$(curl -fsSL "https://github.com/redox-rpi/redox-rpi/releases/download/$tag/$asset")" ||
     die "no $asset in release $tag"
-experiments=()
+experiments=() names=()
 for exp in $(sed -n 's/^experiments = \[\(.*\)\]$/\1/p' <<< "$manifest" | tr -d '",'); do
     if [ -d "$clone/patches/experiments/$exp" ]; then
         experiments+=(--experiment "$exp")
+        names+=("$exp")
     else
         log "experiment $exp of $tag is not in redox-rpi $track, left out"
     fi
 done
-log "experiments of $tag: ${experiments[*]//--experiment /}"
+log "experiments of $tag: ${names[*]}"
 
 # 3. The generated experiment, ignored by git in the clone, so the build
 #    does not count it as a local change.
