@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+# Build this repository's packages against one redox-rpi OS release and
+# publish them for that release (#1). Redox has no stable system call ABI:
+# relibc and the kernel change together, so a package runs only on the OS
+# it was built against.
+#
+# Usage:
+#   scripts/build.sh [--main] [--clone <dir>] [--pkg-dir <dir>]
+#                    [--no-publish]
+#
+#   (default)    build against the tag in os-release and publish to
+#                <pkg dir>/<tag>/
+#   --main       build against redox-rpi main (development images) and
+#                publish to <pkg dir>/main/
+#   --clone      the redox-rpi clone to build in (default build/redox-rpi
+#                here; made on first use). Builds only in a clone of its
+#                own, never in one another session builds in
+#   --pkg-dir    where the package repositories go (default /srv/tftp/pkg,
+#                the image server's pkg/ directory)
+#   --no-publish build only
+#
+# Steps:
+#   1. check out redox-rpi in the clone at the tag (or origin/main); the
+#      clone must have no local changes
+#   2. read the experiments of the tag's release build from its manifest
+#      (release asset redox-rpi-<tag>-pi3bplus.img.manifest.toml); --main
+#      uses the same list, without experiments main no longer has
+#   3. write the experiment patches/experiments/apps-build/ into the clone
+#      (git ignores it there): config.toml from here and recipes/ from here
+#   4. scripts/build-image.sh --no-test-experiments with those experiments
+#      and apps-build; the cookbook builds every package of config.toml
+#   5. publish with the clone's scripts/publish-pkg-repo.sh: the packages
+#      of config.toml and what they depend on, minus the OS's own packages,
+#      signed with the redox-rpi repository key
+#
+# Needs what a redox-rpi build needs (docs/building.md there) and the
+# repository key of scripts/publish-pkg-repo.sh. Takes about an hour on the
+# build host, longer for the first build of a new clone.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_URL=https://github.com/redox-rpi/redox-rpi.git
+TARGET=aarch64-unknown-redox
+EXP=apps-build
+# Published by redox-rpi itself (its scripts/publish-pkg-repo.sh), never
+# from here, even when a package here depends on them.
+OS_PACKAGES=" base base-initfs bootloader kernel relibc pkgutils redoxfs "
+
+main=0
+clone="$ROOT/build/redox-rpi"
+pkg_dir=/srv/tftp/pkg
+publish=1
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --main) main=1; shift ;;
+        --clone) clone="$2"; shift 2 ;;
+        --pkg-dir) pkg_dir="$2"; shift 2 ;;
+        --no-publish) publish=0; shift ;;
+        *) echo "unknown argument: $1" >&2; exit 1 ;;
+    esac
+done
+die() { echo "build.sh: $*" >&2; exit 1; }
+log() { echo "build.sh: $*"; }
+
+tag="$(tr -d ' \n' < "$ROOT/os-release")"
+[[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "os-release: $tag is not a release tag like v0.6.0"
+if [ "$main" = 1 ]; then track=main; ref=origin/main; else track="$tag"; ref="refs/tags/$tag"; fi
+
+# The package list: the keys of [packages] in config.toml.
+mapfile -t wanted < <(python3 - "$ROOT/config.toml" <<'EOF'
+import sys, tomllib
+for name in tomllib.load(open(sys.argv[1], "rb")).get("packages", {}):
+    print(name)
+EOF
+)
+[ "${#wanted[@]}" -gt 0 ] || { log "no packages in config.toml, nothing to build"; exit 0; }
+
+# 1. The clone, at the tag or main.
+if [ ! -d "$clone/.git" ]; then
+    log "cloning redox-rpi into $clone"
+    git clone -q "$REPO_URL" "$clone"
+fi
+git -C "$clone" fetch -q --tags origin
+[ -z "$(git -C "$clone" status --porcelain -uno)" ] || die "$clone has local changes"
+git -C "$clone" checkout -q --detach "$ref"
+commit="$(git -C "$clone" rev-parse HEAD)"
+log "redox-rpi $track at ${commit:0:12}"
+
+# The cookbook reuses a package's earlier build when its own source did not
+# change, even when relibc did. Packages built against another relibc are
+# what this repository must never publish, so a new relibc (its pin or its
+# patches) clears the builds of every recipe outside recipes/core.
+libc_key="$( (cd "$clone" && grep -E '^relibc[ =]' config/upstream.lock; cat patches/relibc/*.patch 2>/dev/null) | sha256sum | cut -c1-16)"
+stamp="$clone/build/.apps-relibc"
+if [ -d "$clone/upstream/redox/recipes" ] && [ "$(cat "$stamp" 2>/dev/null)" != "$libc_key" ]; then
+    log "relibc differs from the last build here: clearing the builds outside recipes/core"
+    find "$clone/upstream/redox/recipes" -path "$clone/upstream/redox/recipes/core" -prune -o \
+        -type d -name target -prune -exec rm -rf {} +
+fi
+
+# 2. The release build's experiments.
+asset="redox-rpi-$tag-pi3bplus.img.manifest.toml"
+manifest="$(curl -fsSL "https://github.com/redox-rpi/redox-rpi/releases/download/$tag/$asset")" ||
+    die "no $asset in release $tag"
+experiments=() names=()
+for exp in $(sed -n 's/^experiments = \[\(.*\)\]$/\1/p' <<< "$manifest" | tr -d '",'); do
+    if [ -d "$clone/patches/experiments/$exp" ]; then
+        experiments+=(--experiment "$exp")
+        names+=("$exp")
+    else
+        log "experiment $exp of $tag is not in redox-rpi $track, left out"
+    fi
+done
+log "experiments of $tag: ${names[*]}"
+
+# 3. The generated experiment, ignored by git in the clone, so the build
+#    does not count it as a local change.
+exp_dir="$clone/patches/experiments/$EXP"
+grep -qx "/patches/experiments/$EXP/" "$clone/.git/info/exclude" 2>/dev/null ||
+    echo "/patches/experiments/$EXP/" >> "$clone/.git/info/exclude"
+rm -rf "$exp_dir"
+mkdir -p "$exp_dir"
+cp "$ROOT/config.toml" "$exp_dir/config.toml"
+[ -d "$ROOT/recipes" ] && cp -r "$ROOT/recipes" "$exp_dir/recipes"
+rm -f "$exp_dir/recipes/README.md"
+{
+    echo "Generated by redox-rpi/apps scripts/build.sh at $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)."
+    echo "Builds the apps packages against redox-rpi $track; do not edit."
+} > "$exp_dir/README.md"
+
+# 4. The build.
+mkdir -p "$ROOT/build"
+blog="$ROOT/build/build-$track.log"
+log "building ${wanted[*]} (log $blog)"
+(cd "$clone" && scripts/build-image.sh --no-test-experiments "${experiments[@]}" --experiment "$EXP") \
+    > "$blog" 2>&1 || die "build failed, see $blog"
+mkdir -p "$clone/build"
+echo "$libc_key" > "$stamp"
+build_id="$(sed -n 's/^build_id = "\(.*\)"$/\1/p' "$clone/build/manifests/netboot-latest.toml")"
+log "built $build_id"
+
+# 5. What to publish: the packages and their dependencies, without the OS.
+repo="$clone/upstream/redox/repo/$TARGET"
+mapfile -t packages < <(python3 - "$repo" "$OS_PACKAGES" "${wanted[@]}" <<'EOF'
+import os, sys, tomllib
+repo, os_packages, todo = sys.argv[1], sys.argv[2].split(), sys.argv[3:]
+seen = set()
+while todo:
+    name = todo.pop()
+    if name in seen or name in os_packages:
+        continue
+    seen.add(name)
+    path = os.path.join(repo, name + ".toml")
+    if not os.path.exists(path):
+        sys.exit("build.sh: %s was not built (no %s)" % (name, path))
+    todo += tomllib.load(open(path, "rb")).get("depends", [])
+print("\n".join(sorted(seen)))
+EOF
+) || die "package list failed"
+[ "${#packages[@]}" -gt 0 ] || die "no package to publish"
+log "packages: ${packages[*]}"
+
+if [ "$publish" = 0 ]; then
+    log "--no-publish: done"
+    exit 0
+fi
+out="$pkg_dir/$track"
+(cd "$clone" && scripts/publish-pkg-repo.sh --out "$out" "${packages[@]}")
+log "published for redox-rpi $track ($build_id): $out/$TARGET/"

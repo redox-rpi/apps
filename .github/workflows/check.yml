@@ -1,0 +1,48 @@
+# Checks what GitHub Actions can check without the redox-rpi build
+# environment: the OS pin and the recipes. The packages are built on the
+# build host with scripts/build.sh (#1).
+name: check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: os-release names a redox-rpi release with a manifest
+        run: |
+          tag="$(tr -d ' \n' < os-release)"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "os-release: $tag is not a release tag"; exit 1; }
+          git ls-remote --exit-code --tags https://github.com/redox-rpi/redox-rpi.git "refs/tags/$tag" > /dev/null ||
+            { echo "redox-rpi has no tag $tag"; exit 1; }
+          curl -fsIL -o /dev/null "https://github.com/redox-rpi/redox-rpi/releases/download/$tag/redox-rpi-$tag-pi3bplus.img.manifest.toml" ||
+            { echo "release $tag has no manifest asset"; exit 1; }
+          echo "ok: $tag"
+      - name: config.toml and every recipe.toml parse, every recipe is listed
+        run: |
+          python3 - <<'EOF'
+          import pathlib, sys, tomllib
+          bad = 0
+          config = tomllib.load(open("config.toml", "rb"))
+          listed = set(config.get("packages", {}))
+          for path in sorted(pathlib.Path("recipes").rglob("recipe.toml")):
+              try:
+                  tomllib.load(open(path, "rb"))
+              except tomllib.TOMLDecodeError as e:
+                  print("FAIL %s: %s" % (path, e)); bad += 1; continue
+              name = path.parent.name
+              if name not in listed:
+                  print("FAIL %s: %s is not in config.toml [packages]" % (path, name)); bad += 1
+              else:
+                  print("ok   %s" % path)
+          sys.exit(1 if bad else 0)
+          EOF
+      - name: scripts parse
+        run: bash -n scripts/*.sh
